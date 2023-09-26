@@ -3,13 +3,15 @@ package main
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 type Scan struct {
-	Item    string `json:"item"`
-	OrgCode string `json:"org_code"`
+	Item      string    `json:"item"`
+	OrgCode   string    `json:"org_code"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 var (
@@ -17,9 +19,15 @@ var (
 	mutex sync.Mutex
 )
 
+const expirationTime = 6 * time.Hour
+
 func main() {
 	r := gin.Default()
 	r.Use(CORSMiddleware())
+
+	// Start a goroutine to periodically clean up old scans
+	go cleanupOldScans()
+
 	r.POST("/scans", func(c *gin.Context) {
 		var newScans []string
 		if err := c.BindJSON(&newScans); err != nil {
@@ -27,17 +35,16 @@ func main() {
 			return
 		}
 		mutex.Lock()
+		currentTime := time.Now()
 		for _, newItem := range newScans {
-			// Remove the last 3 symbols as the organization code
 			orgCode := newItem[len(newItem)-3:]
 			item := newItem[:len(newItem)-3]
-
-			// Add the item and organization code to the scans array
-			scans = append(scans, Scan{Item: item, OrgCode: orgCode})
+			scans = append(scans, Scan{Item: item, OrgCode: orgCode, Timestamp: currentTime})
 		}
 		mutex.Unlock()
 		c.JSON(http.StatusCreated, gin.H{"message": "Scans added successfully"})
 	})
+
 	r.GET("/scans/:orgCode", func(c *gin.Context) {
 		requestedOrgCode := c.Param("orgCode")
 		mutex.Lock()
@@ -50,6 +57,7 @@ func main() {
 		mutex.Unlock()
 		c.JSON(http.StatusOK, filteredScans)
 	})
+
 	r.DELETE("/scans/:orgCode", func(c *gin.Context) {
 		orgCodeToDelete := c.Param("orgCode")
 		mutex.Lock()
@@ -65,6 +73,7 @@ func main() {
 		mutex.Unlock()
 		c.JSON(http.StatusOK, gin.H{"message": "Scans cleared successfully for OrgCode: " + orgCodeToDelete})
 	})
+
 	r.Run(":8080")
 }
 
@@ -81,5 +90,21 @@ func CORSMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+func cleanupOldScans() {
+	ticker := time.NewTicker(1 * time.Hour) // Check every hour
+	for range ticker.C {
+		mutex.Lock()
+		currentTime := time.Now()
+		var newScans []Scan
+		for _, scan := range scans {
+			if currentTime.Sub(scan.Timestamp) < expirationTime {
+				newScans = append(newScans, scan)
+			}
+		}
+		scans = newScans
+		mutex.Unlock()
 	}
 }
